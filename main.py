@@ -5,8 +5,6 @@ import re
 
 app = FastAPI()
 
-# ----------- Request Model -----------
-
 class ReferenceRequest(BaseModel):
     references: list[str]
 
@@ -27,10 +25,7 @@ def extract_title(ref: str):
 
 def search_crossref(title: str):
     url = "https://api.crossref.org/works"
-    params = {
-        "query.title": title,
-        "rows": 1
-    }
+    params = {"query.title": title, "rows": 1}
 
     try:
         r = requests.get(url, params=params, timeout=5)
@@ -45,7 +40,26 @@ def search_crossref(title: str):
         return None
 
 
-# ----------- BALANCED DOI VALIDATION -----------
+# ----------- FALLBACK SEARCH -----------
+
+def fallback_search(title: str):
+    url = "https://api.crossref.org/works"
+    params = {"query": title, "rows": 1}
+
+    try:
+        r = requests.get(url, params=params, timeout=5)
+        data = r.json()
+
+        if not data["message"]["items"]:
+            return None
+
+        return data["message"]["items"][0]
+
+    except:
+        return None
+
+
+# ----------- DOI VALIDATION -----------
 
 def check_doi_link(doi: str):
     url = f"https://doi.org/{doi}"
@@ -60,22 +74,19 @@ def check_doi_link(doi: str):
 
         final_url = response.url
 
-        # ❌ If still stuck on doi.org → invalid
         if "doi.org" in final_url:
             return False
 
-        # ❌ Reject only real HTTP errors
         if response.status_code >= 400:
             return False
 
-        # ✅ Accept everything else (balanced approach)
         return True
 
-    except requests.exceptions.RequestException:
+    except:
         return False
 
 
-# ----------- APA FORMAT -----------
+# ----------- FORMAT APA -----------
 
 def format_apa(item):
     authors = item.get("author", [])
@@ -119,14 +130,12 @@ def home():
     return {"message": "Batch Reference Verifier API is running"}
 
 
-# ----------- OPTIONAL: Fix Render HEAD Warning -----------
-
 @app.head("/")
 def head():
     return {"status": "ok"}
 
 
-# ----------- BATCH VERIFY -----------
+# ----------- MAIN ENDPOINT -----------
 
 @app.post("/verify-batch")
 def verify_batch(request: ReferenceRequest):
@@ -137,24 +146,30 @@ def verify_batch(request: ReferenceRequest):
 
     for ref in request.references:
         title = extract_title(ref)
+
+        # PRIMARY SEARCH
         data = search_crossref(title)
 
         if data and data.get("DOI"):
             doi = data.get("DOI")
 
-            # Check DOI link (balanced)
             if check_doi_link(doi):
                 results.append({
                     "status": "verified",
                     "formatted": format_apa(data)
                 })
                 verified_count += 1
-            else:
-                results.append({
-                    "status": "not_found",
-                    "original": ref
-                })
-                not_found_count += 1
+                continue
+
+        # FALLBACK SEARCH (UNCERTAIN MATCH)
+        fallback = fallback_search(title)
+
+        if fallback and fallback.get("DOI"):
+            results.append({
+                "status": "uncertain",
+                "formatted": format_apa(fallback)
+            })
+            not_found_count += 1
         else:
             results.append({
                 "status": "not_found",
