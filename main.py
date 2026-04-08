@@ -39,7 +39,7 @@ def search_crossref(title: str):
         return None
 
 
-# ----------- DOI Check -----------
+# ----------- DOI Check (SOFT) -----------
 
 def check_doi_link(doi: str):
     url = f"https://doi.org/{doi}"
@@ -52,10 +52,7 @@ def check_doi_link(doi: str):
             headers={"User-Agent": "Mozilla/5.0"}
         )
 
-        if response.status_code >= 400:
-            return False
-
-        return True
+        return response.status_code < 400
 
     except:
         return False
@@ -110,7 +107,8 @@ def format_apa(item):
     if pages:
         citation += f", {pages}"
 
-    citation += f". https://doi.org/{doi}"
+    if doi:
+        citation += f". https://doi.org/{doi}"
 
     return citation
 
@@ -129,24 +127,31 @@ def verify_batch(request: ReferenceRequest):
         title = extract_title(ref)
         crossref = search_crossref(title)
 
-        if crossref and crossref.get("DOI") and is_valid_paper(crossref):
+        if crossref and is_valid_paper(crossref):
 
-            doi = crossref.get("DOI")
+            doi = crossref.get("DOI", "")
+            formatted = format_apa(crossref)
 
-            if check_doi_link(doi):
-                results.append({
-                    "status": "verified",
-                    "formatted": format_apa(crossref)
-                })
-                verified_count += 1
+            if doi:
+                doi_valid = check_doi_link(doi)
+
+                if doi_valid:
+                    status = "verified"
+                    verified_count += 1
+                else:
+                    status = "uncertain"
+                    not_found_count += 1
             else:
-                results.append({
-                    "status": "uncertain",
-                    "formatted": format_apa(crossref)
-                })
+                status = "uncertain"
                 not_found_count += 1
 
+            results.append({
+                "status": status,
+                "formatted": formatted
+            })
+
         else:
+            # fallback — keep original reference
             results.append({
                 "status": "not_found",
                 "formatted": ref
