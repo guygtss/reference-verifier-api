@@ -1,14 +1,13 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-import requests
+import httpx
+import asyncio
 import re
-from difflib import SequenceMatcher
 
 app = FastAPI()
 
 class ReferenceRequest(BaseModel):
     references: list[str]
-
 
 # ----------- Extract Title -----------
 
@@ -22,78 +21,7 @@ def extract_title(ref: str):
         return ref
 
 
-# ----------- Similarity -----------
-
-def similarity(a, b):
-    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
-
-
-# ----------- Crossref -----------
-
-def search_crossref(title: str):
-    url = "https://api.crossref.org/works"
-    params = {"query.title": title, "rows": 1}
-
-    try:
-        r = requests.get(url, params=params, timeout=5)
-        data = r.json()
-
-        if not data["message"]["items"]:
-            return None
-
-        return data["message"]["items"][0]
-    except:
-        return None
-
-
-# ----------- Semantic Scholar -----------
-
-def search_semantic_scholar(title: str):
-    url = "https://api.semanticscholar.org/graph/v1/paper/search"
-    params = {
-        "query": title,
-        "limit": 1,
-        "fields": "title,authors"
-    }
-
-    try:
-        r = requests.get(url, params=params, timeout=5)
-        data = r.json()
-
-        if not data.get("data"):
-            return None
-
-        return data["data"][0]
-    except:
-        return None
-
-
-# ----------- DOI CHECK -----------
-
-def check_doi_link(doi: str):
-    url = f"https://doi.org/{doi}"
-
-    try:
-        response = requests.get(
-            url,
-            timeout=5,
-            allow_redirects=True,
-            headers={"User-Agent": "Mozilla/5.0"}
-        )
-
-        if "doi.org" in response.url:
-            return False
-
-        if response.status_code >= 400:
-            return False
-
-        return True
-
-    except:
-        return False
-
-
-# ----------- FORMAT -----------
+# ----------- APA FORMAT -----------
 
 def format_apa(item):
     authors = item.get("author", [])
@@ -130,50 +58,113 @@ def format_apa(item):
     return citation
 
 
-# ----------- MAIN -----------
+# ----------- Async Crossref -----------
 
-@app.post("/verify-batch")
-def verify_batch(request: ReferenceRequest):
+async def search_crossref(client, title):
+    url = "https://api.crossref.org/works"
+    params = {"query.title": title, "rows": 1}
 
-    results = []
-    verified_count = 0
-    not_found_count = 0
+    try:
+        r = await client.get(url, params=params, timeout=5)
+        data = r.json()
 
-    for ref in request.references:
+        if not data["message"]["items"]:
+            return None
+
+        return data["message"]["items"][0]
+
+    except:
+        return None
+
+
+# ----------- Async DOI Check -----------
+
+async def check_doi_link(client, doi):
+    url = f"https://doi.org/{doi}"
+
+    try:
+        response = await client.get(
+            url,
+            timeout=5,
+            follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+
+        if "doi.org" in str(response.url):
+            return False
+
+        if response.status_code >= 400:
+            return False
+
+        return True
+
+    except:
+        return False
+
+
+# ----------- VALIDATION FILTER -----------
+
+def is_valid_paper(item):
+    if not item.get("author"):
+        return False
+
+    if not item.get("container-title"):
+        return False
+
+    title = item.get("title", [""])[0].lower()
+
+    if any(x in title for x in ["figure", "review", "call for papers"]):
+        return False
+
+    return True
+
+
+# ----------- PROCESS SINGLE REFERENCE -----------
+
+async def process_reference(ref, client, semaphore):
+    async with semaphore:
+
         title = extract_title(ref)
+        crossref = await search_crossref(client, title)
 
-        crossref = search_crossref(title)
-
-        if crossref and crossref.get("DOI"):
+        if crossref and crossref.get("DOI") and is_valid_paper(crossref):
             doi = crossref.get("DOI")
 
-            semantic = search_semantic_scholar(title)
+            if await check_doi_link(client, doi):
+                return {
+                    "status": "verified",
+                    "formatted": format_apa(crossref)
+                }
 
-            if semantic:
-                semantic_title = semantic.get("title", "")
-
-                if similarity(title, semantic_title) > 0.8:
-                    if check_doi_link(doi):
-                        results.append({
-                            "status": "verified",
-                            "formatted": format_apa(crossref)
-                        })
-                        verified_count += 1
-                        continue
-
-            # Crossref found but not confirmed
-            results.append({
+            return {
                 "status": "uncertain",
                 "formatted": format_apa(crossref)
-            })
-            not_found_count += 1
+            }
 
-        else:
-            results.append({
-                "status": "not_found",
-                "formatted": ref
-            })
-            not_found_count += 1
+        return {
+            "status": "not_found",
+            "formatted": ref
+        }
+
+
+# ----------- MAIN ENDPOINT -----------
+
+@app.post("/verify-batch")
+async def verify_batch(request: ReferenceRequest):
+
+    semaphore = asyncio.Semaphore(10)  # limit concurrency
+
+    async with httpx.AsyncClient() as client:
+
+        tasks = [
+            process_reference(ref, client, semaphore)
+            for ref in request.references
+        ]
+
+        results = await asyncio.gather(*tasks)
+
+    verified_count = sum(1 for r in results if r["status"] == "verified")
+    not_found_count = len(results) - verified_count
 
     return {
         "summary": {
