@@ -45,7 +45,7 @@ def search_crossref(title: str):
         return None
 
 
-# ----------- ADVANCED DOI VALIDATION -----------
+# ----------- BALANCED DOI VALIDATION -----------
 
 def check_doi_link(doi: str):
     url = f"https://doi.org/{doi}"
@@ -60,32 +60,15 @@ def check_doi_link(doi: str):
 
         final_url = response.url
 
-        # ❌ Still stuck on DOI resolver (bad)
+        # ❌ If still stuck on doi.org → invalid
         if "doi.org" in final_url:
             return False
 
-        # ❌ Bad HTTP response
-        if response.status_code != 200:
+        # ❌ Reject only real HTTP errors
+        if response.status_code >= 400:
             return False
 
-        # ❌ Very small page → likely broken
-        if len(response.text) < 500:
-            return False
-
-        # ❌ Error indicators in content
-        error_keywords = [
-            "not found",
-            "error",
-            "page not available",
-            "cannot be reached",
-            "invalid",
-            "failed"
-        ]
-
-        content_lower = response.text.lower()
-        if any(keyword in content_lower for keyword in error_keywords):
-            return False
-
+        # ✅ Accept everything else (balanced approach)
         return True
 
     except requests.exceptions.RequestException:
@@ -136,6 +119,13 @@ def home():
     return {"message": "Batch Reference Verifier API is running"}
 
 
+# ----------- OPTIONAL: Fix Render HEAD Warning -----------
+
+@app.head("/")
+def head():
+    return {"status": "ok"}
+
+
 # ----------- BATCH VERIFY -----------
 
 @app.post("/verify-batch")
@@ -149,11 +139,10 @@ def verify_batch(request: ReferenceRequest):
         title = extract_title(ref)
         data = search_crossref(title)
 
-        # Found in CrossRef
         if data and data.get("DOI"):
             doi = data.get("DOI")
 
-            # Validate DOI link
+            # Check DOI link (balanced)
             if check_doi_link(doi):
                 results.append({
                     "status": "verified",
@@ -166,8 +155,6 @@ def verify_batch(request: ReferenceRequest):
                     "original": ref
                 })
                 not_found_count += 1
-
-        # Not found at all
         else:
             results.append({
                 "status": "not_found",
