@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 import requests
 import re
+from difflib import SequenceMatcher
 
 app = FastAPI()
 
@@ -21,11 +22,17 @@ def extract_title(ref: str):
         return ref
 
 
-# ----------- CrossRef Search -----------
+# ----------- Similarity -----------
 
-def search_crossref(query: str):
+def similarity(a, b):
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+
+
+# ----------- Crossref -----------
+
+def search_crossref(title: str):
     url = "https://api.crossref.org/works"
-    params = {"query": query, "rows": 1}
+    params = {"query.title": title, "rows": 1}
 
     try:
         r = requests.get(url, params=params, timeout=5)
@@ -35,12 +42,33 @@ def search_crossref(query: str):
             return None
 
         return data["message"]["items"][0]
-
     except:
         return None
 
 
-# ----------- DOI VALIDATION -----------
+# ----------- Semantic Scholar -----------
+
+def search_semantic_scholar(title: str):
+    url = "https://api.semanticscholar.org/graph/v1/paper/search"
+    params = {
+        "query": title,
+        "limit": 1,
+        "fields": "title,authors"
+    }
+
+    try:
+        r = requests.get(url, params=params, timeout=5)
+        data = r.json()
+
+        if not data.get("data"):
+            return None
+
+        return data["data"][0]
+    except:
+        return None
+
+
+# ----------- DOI CHECK -----------
 
 def check_doi_link(doi: str):
     url = f"https://doi.org/{doi}"
@@ -74,7 +102,7 @@ def format_apa(item):
     for i, a in enumerate(authors):
         name = f"{a.get('family', '')}, {a.get('given', '')[:1]}."
         if i == len(authors) - 1 and i > 0:
-            author_str += f" & {name}"
+            author_str += f", & {name}"
         elif i > 0:
             author_str += f", {name}"
         else:
@@ -114,34 +142,36 @@ def verify_batch(request: ReferenceRequest):
     for ref in request.references:
         title = extract_title(ref)
 
-        # STEP 1: Try strong match
-        data = search_crossref(title)
+        crossref = search_crossref(title)
 
-        if data and data.get("DOI"):
-            doi = data.get("DOI")
+        if crossref and crossref.get("DOI"):
+            doi = crossref.get("DOI")
 
-            if check_doi_link(doi):
-                results.append({
-                    "status": "verified",
-                    "formatted": format_apa(data)
-                })
-                verified_count += 1
-                continue
+            semantic = search_semantic_scholar(title)
 
-        # STEP 2: ALWAYS attempt fallback
-        fallback = search_crossref(ref)
+            if semantic:
+                semantic_title = semantic.get("title", "")
 
-        if fallback and fallback.get("DOI"):
+                if similarity(title, semantic_title) > 0.8:
+                    if check_doi_link(doi):
+                        results.append({
+                            "status": "verified",
+                            "formatted": format_apa(crossref)
+                        })
+                        verified_count += 1
+                        continue
+
+            # Crossref found but not confirmed
             results.append({
                 "status": "uncertain",
-                "formatted": format_apa(fallback)
+                "formatted": format_apa(crossref)
             })
             not_found_count += 1
+
         else:
-            # FINAL fallback → still try minimal DOI guess
             results.append({
-                "status": "uncertain",
-                "formatted": ref  # keep structure but no DOI
+                "status": "not_found",
+                "formatted": ref
             })
             not_found_count += 1
 
