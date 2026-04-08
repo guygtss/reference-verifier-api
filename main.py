@@ -1,13 +1,13 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-import httpx
-import asyncio
+import requests
 import re
 
 app = FastAPI()
 
 class ReferenceRequest(BaseModel):
     references: list[str]
+
 
 # ----------- Extract Title -----------
 
@@ -21,7 +21,64 @@ def extract_title(ref: str):
         return ref
 
 
-# ----------- APA FORMAT -----------
+# ----------- Crossref Search -----------
+
+def search_crossref(title: str):
+    url = "https://api.crossref.org/works"
+    params = {"query.title": title, "rows": 1}
+
+    try:
+        r = requests.get(url, params=params, timeout=5)
+        data = r.json()
+
+        if not data["message"]["items"]:
+            return None
+
+        return data["message"]["items"][0]
+    except:
+        return None
+
+
+# ----------- DOI Check -----------
+
+def check_doi_link(doi: str):
+    url = f"https://doi.org/{doi}"
+
+    try:
+        response = requests.get(
+            url,
+            timeout=5,
+            allow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+
+        if response.status_code >= 400:
+            return False
+
+        return True
+
+    except:
+        return False
+
+
+# ----------- Filter Junk -----------
+
+def is_valid_paper(item):
+    if not item.get("author"):
+        return False
+
+    if not item.get("container-title"):
+        return False
+
+    title = item.get("title", [""])[0].lower()
+
+    if any(x in title for x in ["figure", "review", "call for papers"]):
+        return False
+
+    return True
+
+
+# ----------- APA Format -----------
 
 def format_apa(item):
     authors = item.get("author", [])
@@ -58,113 +115,43 @@ def format_apa(item):
     return citation
 
 
-# ----------- Async Crossref -----------
-
-async def search_crossref(client, title):
-    url = "https://api.crossref.org/works"
-    params = {"query.title": title, "rows": 1}
-
-    try:
-        r = await client.get(url, params=params, timeout=5)
-        data = r.json()
-
-        if not data["message"]["items"]:
-            return None
-
-        return data["message"]["items"][0]
-
-    except:
-        return None
-
-
-# ----------- Async DOI Check -----------
-
-async def check_doi_link(client, doi):
-    url = f"https://doi.org/{doi}"
-
-    try:
-        response = await client.get(
-            url,
-            timeout=5,
-            follow_redirects=True,
-            headers={"User-Agent": "Mozilla/5.0"}
-        )
-
-        if "doi.org" in str(response.url):
-            return False
-
-        if response.status_code >= 400:
-            return False
-
-        return True
-
-    except:
-        return False
-
-
-# ----------- VALIDATION FILTER -----------
-
-def is_valid_paper(item):
-    if not item.get("author"):
-        return False
-
-    if not item.get("container-title"):
-        return False
-
-    title = item.get("title", [""])[0].lower()
-
-    if any(x in title for x in ["figure", "review", "call for papers"]):
-        return False
-
-    return True
-
-
-# ----------- PROCESS SINGLE REFERENCE -----------
-
-async def process_reference(ref, client, semaphore):
-    async with semaphore:
-
-        title = extract_title(ref)
-        crossref = await search_crossref(client, title)
-
-        if crossref and crossref.get("DOI") and is_valid_paper(crossref):
-            doi = crossref.get("DOI")
-
-            if await check_doi_link(client, doi):
-                return {
-                    "status": "verified",
-                    "formatted": format_apa(crossref)
-                }
-
-            return {
-                "status": "uncertain",
-                "formatted": format_apa(crossref)
-            }
-
-        return {
-            "status": "not_found",
-            "formatted": ref
-        }
-
-
-# ----------- MAIN ENDPOINT -----------
+# ----------- MAIN -----------
 
 @app.post("/verify-batch")
-async def verify_batch(request: ReferenceRequest):
+def verify_batch(request: ReferenceRequest):
 
-    semaphore = asyncio.Semaphore(10)  # limit concurrency
+    results = []
+    verified_count = 0
+    not_found_count = 0
 
-    async with httpx.AsyncClient() as client:
+    for ref in request.references:
 
-        tasks = [
-            process_reference(ref, client, semaphore)
-            for ref in request.references
-        ]
+        title = extract_title(ref)
+        crossref = search_crossref(title)
 
-        results = await asyncio.gather(*tasks)
+        if crossref and crossref.get("DOI") and is_valid_paper(crossref):
 
-    verified_count = sum(1 for r in results if r["status"] == "verified")
-    not_found_count = len(results) - verified_count
+            doi = crossref.get("DOI")
+
+            if check_doi_link(doi):
+                results.append({
+                    "status": "verified",
+                    "formatted": format_apa(crossref)
+                })
+                verified_count += 1
+            else:
+                results.append({
+                    "status": "uncertain",
+                    "formatted": format_apa(crossref)
+                })
+                not_found_count += 1
+
+        else:
+            results.append({
+                "status": "not_found",
+                "formatted": ref
+            })
+            not_found_count += 1
 
     return {
         "summary": {
