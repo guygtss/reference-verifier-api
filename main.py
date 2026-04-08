@@ -11,11 +11,10 @@ class ReferenceRequest(BaseModel):
     references: list[str]
 
 
-# ----------- Helper: Extract Title -----------
+# ----------- Extract Title -----------
 
 def extract_title(ref: str):
     try:
-        # Extract title after year
         match = re.search(r"\)\.\s(.+?)\.", ref)
         if match:
             return match.group(1)
@@ -24,7 +23,7 @@ def extract_title(ref: str):
         return ref
 
 
-# ----------- Helper: Query CrossRef -----------
+# ----------- CrossRef Search -----------
 
 def search_crossref(title: str):
     url = "https://api.crossref.org/works"
@@ -46,7 +45,25 @@ def search_crossref(title: str):
         return None
 
 
-# ----------- Helper: Format APA -----------
+# ----------- DOI LINK VALIDATION -----------
+
+def check_doi_link(doi: str):
+    url = f"https://doi.org/{doi}"
+
+    try:
+        response = requests.get(url, timeout=5, allow_redirects=True)
+
+        # Only accept real working pages
+        if response.status_code == 200:
+            return True
+
+        return False
+
+    except:
+        return False
+
+
+# ----------- APA FORMAT -----------
 
 def format_apa(item):
     authors = item.get("author", [])
@@ -69,7 +86,7 @@ def format_apa(item):
     pages = item.get("page", "")
     doi = item.get("DOI", "")
 
-    citation = f"{author_str} ({year}). {title}. *{journal}"
+    citation = f"{author_str} ({year}). {title}. {journal}"
 
     if volume:
         citation += f", {volume}"
@@ -83,35 +100,56 @@ def format_apa(item):
     return citation
 
 
-# ----------- Root -----------
+# ----------- ROOT -----------
 
 @app.get("/")
 def home():
     return {"message": "Batch Reference Verifier API is running"}
 
 
-# ----------- Batch Endpoint -----------
+# ----------- BATCH VERIFY -----------
 
 @app.post("/verify-batch")
 def verify_batch(request: ReferenceRequest):
+
     results = []
+    verified_count = 0
+    not_found_count = 0
 
     for ref in request.references:
         title = extract_title(ref)
         data = search_crossref(title)
 
-        if data:
-            results.append({
-                "status": "found",
-                "formatted": format_apa(data)
-            })
+        # Case 1: Found in CrossRef
+        if data and data.get("DOI"):
+            doi = data.get("DOI")
+
+            # Check if DOI actually works
+            if check_doi_link(doi):
+                results.append({
+                    "status": "verified",
+                    "formatted": format_apa(data)
+                })
+                verified_count += 1
+            else:
+                results.append({
+                    "status": "not_found",
+                    "original": ref
+                })
+                not_found_count += 1
+
+        # Case 2: Not found at all
         else:
             results.append({
                 "status": "not_found",
                 "original": ref
             })
+            not_found_count += 1
 
     return {
-        "total": len(request.references),
+        "summary": {
+            "verified": verified_count,
+            "not_found": not_found_count
+        },
         "results": results
     }
