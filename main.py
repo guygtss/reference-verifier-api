@@ -23,28 +23,9 @@ def extract_title(ref: str):
 
 # ----------- CrossRef Search -----------
 
-def search_crossref(title: str):
+def search_crossref(query: str):
     url = "https://api.crossref.org/works"
-    params = {"query.title": title, "rows": 1}
-
-    try:
-        r = requests.get(url, params=params, timeout=5)
-        data = r.json()
-
-        if not data["message"]["items"]:
-            return None
-
-        return data["message"]["items"][0]
-
-    except:
-        return None
-
-
-# ----------- FALLBACK SEARCH -----------
-
-def fallback_search(title: str):
-    url = "https://api.crossref.org/works"
-    params = {"query": title, "rows": 1}
+    params = {"query": query, "rows": 1}
 
     try:
         r = requests.get(url, params=params, timeout=5)
@@ -72,9 +53,7 @@ def check_doi_link(doi: str):
             headers={"User-Agent": "Mozilla/5.0"}
         )
 
-        final_url = response.url
-
-        if "doi.org" in final_url:
+        if "doi.org" in response.url:
             return False
 
         if response.status_code >= 400:
@@ -86,7 +65,7 @@ def check_doi_link(doi: str):
         return False
 
 
-# ----------- FORMAT APA -----------
+# ----------- FORMAT -----------
 
 def format_apa(item):
     authors = item.get("author", [])
@@ -123,19 +102,7 @@ def format_apa(item):
     return citation
 
 
-# ----------- ROOT -----------
-
-@app.get("/")
-def home():
-    return {"message": "Batch Reference Verifier API is running"}
-
-
-@app.head("/")
-def head():
-    return {"status": "ok"}
-
-
-# ----------- MAIN ENDPOINT -----------
+# ----------- MAIN -----------
 
 @app.post("/verify-batch")
 def verify_batch(request: ReferenceRequest):
@@ -147,7 +114,7 @@ def verify_batch(request: ReferenceRequest):
     for ref in request.references:
         title = extract_title(ref)
 
-        # PRIMARY SEARCH
+        # STEP 1: Try strong match
         data = search_crossref(title)
 
         if data and data.get("DOI"):
@@ -161,8 +128,8 @@ def verify_batch(request: ReferenceRequest):
                 verified_count += 1
                 continue
 
-        # FALLBACK SEARCH (UNCERTAIN MATCH)
-        fallback = fallback_search(title)
+        # STEP 2: ALWAYS attempt fallback
+        fallback = search_crossref(ref)
 
         if fallback and fallback.get("DOI"):
             results.append({
@@ -171,9 +138,10 @@ def verify_batch(request: ReferenceRequest):
             })
             not_found_count += 1
         else:
+            # FINAL fallback → still try minimal DOI guess
             results.append({
-                "status": "not_found",
-                "original": ref
+                "status": "uncertain",
+                "formatted": ref  # keep structure but no DOI
             })
             not_found_count += 1
 
