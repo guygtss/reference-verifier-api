@@ -45,21 +45,50 @@ def search_crossref(title: str):
         return None
 
 
-# ----------- DOI LINK VALIDATION -----------
+# ----------- ADVANCED DOI VALIDATION -----------
 
 def check_doi_link(doi: str):
     url = f"https://doi.org/{doi}"
 
     try:
-        response = requests.get(url, timeout=5, allow_redirects=True)
+        response = requests.get(
+            url,
+            timeout=5,
+            allow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
 
-        # Only accept real working pages
-        if response.status_code == 200:
-            return True
+        final_url = response.url
 
-        return False
+        # ❌ Still stuck on DOI resolver (bad)
+        if "doi.org" in final_url:
+            return False
 
-    except:
+        # ❌ Bad HTTP response
+        if response.status_code != 200:
+            return False
+
+        # ❌ Very small page → likely broken
+        if len(response.text) < 500:
+            return False
+
+        # ❌ Error indicators in content
+        error_keywords = [
+            "not found",
+            "error",
+            "page not available",
+            "cannot be reached",
+            "invalid",
+            "failed"
+        ]
+
+        content_lower = response.text.lower()
+        if any(keyword in content_lower for keyword in error_keywords):
+            return False
+
+        return True
+
+    except requests.exceptions.RequestException:
         return False
 
 
@@ -120,11 +149,11 @@ def verify_batch(request: ReferenceRequest):
         title = extract_title(ref)
         data = search_crossref(title)
 
-        # Case 1: Found in CrossRef
+        # Found in CrossRef
         if data and data.get("DOI"):
             doi = data.get("DOI")
 
-            # Check if DOI actually works
+            # Validate DOI link
             if check_doi_link(doi):
                 results.append({
                     "status": "verified",
@@ -138,7 +167,7 @@ def verify_batch(request: ReferenceRequest):
                 })
                 not_found_count += 1
 
-        # Case 2: Not found at all
+        # Not found at all
         else:
             results.append({
                 "status": "not_found",
